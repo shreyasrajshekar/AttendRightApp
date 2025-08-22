@@ -1,47 +1,57 @@
+// server.js
 import express from "express";
-import multer from "multer";
-import fetch from "node-fetch";
-import FormData from "form-data";
+import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import cors from "cors";
 import dotenv from "dotenv";
+
 dotenv.config();
-
 const app = express();
-const upload = multer({ dest: "uploads/" });
+app.use(express.json());
+app.use(cors());
 
-app.post("/analyse-timetable", upload.single("timetable"), async (req, res) => {
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.error(err));
+
+// User Schema
+const userSchema = new mongoose.Schema({
+  email: { type: String, unique: true },
+  password: String,
+});
+const User = mongoose.model("User", userSchema);
+
+// Signup
+app.post("/signup", async (req, res) => {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    const imageBuffer = req.file;
-
-    // Convert to Base64
-    const base64Image = Buffer.from(
-      require("fs").readFileSync(imageBuffer.path)
-    ).toString("base64");
-
-    // Send to Gemini
-    const response = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-vision:generateContent?key=" + apiKey,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                { text: "Extract the timetable from this image and return JSON with days as keys and subjects as arrays." },
-                { inlineData: { mimeType: "image/jpeg", data: base64Image } }
-              ]
-            }
-          ]
-        })
-      }
-    );
-
-    const data = await response.json();
-    res.json(data);
+    const { email, password } = req.body;
+    const hashed = await bcrypt.hash(password, 10);
+    const user = new User({ email, password: hashed });
+    await user.save();
+    res.json({ message: "Signup successful" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(400).json({ error: "User already exists" });
   }
 });
 
-app.listen(5000, () => console.log("Server running on port 5000"));
+// Login
+app.post("/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ error: "User not found" });
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: "Invalid password" });
+
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    res.json({ token });
+  } catch (err) {
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
