@@ -1,11 +1,24 @@
 import React, { useState } from 'react';
 import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import axios from "axios";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export default function LoginScreen({ navigation }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
+
+const handleLogin = async () => {
+  try {
+    const res = await axios.post("http://localhost:5000/login", { email, password });
+    await AsyncStorage.setItem("token", res.data.token);
+    alert("Login successful");
+    navigation.navigate("Dashboard");
+  } catch (err) {
+    alert(err.response?.data?.error || "Login failed");
+  }
+};
   return (
     <LinearGradient
       colors={['#4eb8e6ff', '#87b4c4ff', '#c0e7f8ff']}
@@ -33,7 +46,7 @@ export default function LoginScreen({ navigation }) {
           onChangeText={setPassword}
         />
 
-        <TouchableOpacity style={styles.button} onPress={() => navigation.navigate('Dashboard')}>
+        <TouchableOpacity style={styles.button} onPress={handleLogin}>
           <Text style={styles.buttonText}>Login</Text>
         </TouchableOpacity>
 
