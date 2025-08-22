@@ -13,6 +13,7 @@ import AdviceChat from './screens/AdviceChat';
 import SplashScreenScreen from './screens/splashScreen';  // renamed to avoid conflict
 import LoginScreen from './screens/loginScreen';
 import SignUpScreen from './screens/SignUpScreen';
+import homeScreen from './screens/homeScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -54,8 +55,9 @@ export default function App() {
         }}
       >
         <Stack.Screen name="AttendRight" component={SplashScreenScreen}/>
+        {/*<Stack.Screen name="HOME" component={homeScreen}/>
         <Stack.Screen name="Login" component={LoginScreen} />
-        <Stack.Screen name="SignUp" component={SignUpScreen} />
+        <Stack.Screen name="SignUp" component={SignUpScreen} />*/}
         <Stack.Screen name="Dashboard" component={Dashboard} />
         <Stack.Screen name="Add Attendance" component={AddAttendance} />
         <Stack.Screen name="Timetable" component={Timetable} />

@@ -1,57 +1,171 @@
 // server.js
 import express from "express";
-import mongoose from "mongoose";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-import cors from "cors";
+import bodyParser from "body-parser";
+import fetch from "node-fetch";
+
+// Import dotenv at the very top to ensure it loads before any variables are used
 import dotenv from "dotenv";
-
 dotenv.config();
+
+// Supabase client and service role key
+// Use the 'createClient' function from the Supabase library
+import { createClient } from "@supabase/supabase-js";
+
+// Supabase (admin, service role key)
+// This is the line that was throwing the error, now it uses the correct env variable name
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+// If you want to use the public key for some operations, you can create a second client.
+// const supabasePublic = createClient(
+//   process.env.SUPABASE_URL,
+//   process.env.SUPABASE_KEY
+// );
+
 const app = express();
-app.use(express.json());
-app.use(cors());
+app.use(bodyParser.json({ limit: "10mb" }));
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(() => console.log("✅ MongoDB connected"))
-  .catch(err => console.error(err));
 
-// User Schema
-const userSchema = new mongoose.Schema({
-  email: { type: String, unique: true },
-  password: String,
-});
-const User = mongoose.model("User", userSchema);
-
-// Signup
-app.post("/signup", async (req, res) => {
+// ----------------------
+// 1) TIMETABLE UPLOAD
+// ----------------------
+app.post("/api/timetable", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const hashed = await bcrypt.hash(password, 10);
-    const user = new User({ email, password: hashed });
-    await user.save();
-    res.json({ message: "Signup successful" });
+    const { clientId, base64Image } = req.body;
+    if (!clientId || !base64Image)
+      return res.status(400).json({ error: "clientId and base64Image required" });
+
+    // Call Gemini
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text:
+                    "Extract this timetable clearly and return a **student-friendly explanation of the schedule** (not JSON).",
+                },
+                {
+                  inline_data: {
+                    mime_type: "image/png",
+                    data: base64Image,
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    const data = await response.json();
+    console.log("Gemini raw:", data);
+
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Could not extract timetable.";
+
+    // Save in Supabase
+    const { error: insertError } = await supabase.from("timetables").insert([
+      {
+        user_id: clientId,
+        timetable: {}, // optionally raw data if parsed later
+        analyzed_text: text,
+      },
+    ]);
+    if (insertError) {
+      console.error("Supabase insert error:", insertError);
+    }
+
+    res.json({ result: text });
   } catch (err) {
-    res.status(400).json({ error: "User already exists" });
+    console.error("Backend error:", err);
+    res.status(500).json({ result: "Error analyzing timetable." });
   }
 });
 
-// Login
-app.post("/login", async (req, res) => {
+// ----------------------
+// 2) CHAT WITH CONTEXT
+// ----------------------
+app.post("/api/chat", async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ error: "User not found" });
+    const { clientId, message } = req.body;
+    if (!clientId || !message)
+      return res.status(400).json({ error: "clientId and message required" });
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: "Invalid password" });
+    // 1) fetch latest timetable
+    const { data: tt } = await supabase
+      .from("timetables")
+      .select("timetable, analyzed_text, created_at")
+      .eq("user_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(1);
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
-    res.json({ token });
-  } catch (err) {
-    res.status(500).json({ error: "Something went wrong" });
+    // 2) fetch attendance
+    const { data: att } = await supabase
+      .from("attendance")
+      .select(
+        "course_code, course_name, total_classes, attended_classes, min_required_percent"
+      )
+      .eq("user_id", clientId);
+
+    const timetableText =
+      tt?.[0]?.analyzed_text ||
+      JSON.stringify(tt?.[0]?.timetable || {}, null, 2);
+    const attendanceText = (att || [])
+      .map((a) => {
+        const T = a.total_classes || 0;
+        const A = a.attended_classes || 0;
+        const p = a.min_required_percent || 75;
+        return `${a.course_code}${
+          a.course_name ? ` (${a.course_name})` : ""
+        }: ${A}/${T} at ${p}% target`;
+      })
+      .join("\n");
+
+    // 3) build prompt
+    const system = `You are a student advisor. Use the user's timetable and attendance to give personalized, actionable advice. 
+- If asked "what can I miss", compute using: bunkable = floor(max(0, (A / (p/100)) - T)). 
+- If asked "how to reach X%", compute minimum classes needed next: need = ceil(p*T - A). 
+- Be concise and friendly.`;
+
+    const userMsg = `User message: ${message}
+
+Latest timetable:
+${timetableText || "(no timetable found)"}
+
+Attendance:
+${attendanceText || "(no attendance found)"}
+`;
+
+    // 4) call Gemini
+    const gRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `${system}\n\n${userMsg}` }] }],
+        }),
+      }
+    );
+    const gData = await gRes.json();
+    const text =
+      gData?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Sorry, I could not generate advice.";
+
+    res.json({ reply: text });
+  } catch (e) {
+    console.error("Chat error:", e);
+    res.status(500).json({ error: "chat error" });
   }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+// ----------------------
+app.listen(5000, () => console.log("Server running on port 5000"));

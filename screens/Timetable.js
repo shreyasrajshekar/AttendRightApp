@@ -1,106 +1,72 @@
-// Timetable.js
-import React, { useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Image, Platform } from "react-native";
+import React, { useState,useEffect } from "react";
+import { View, Text, Button, Image, ScrollView } from "react-native";
 import * as ImagePicker from "expo-image-picker";
-import { LinearGradient } from "expo-linear-gradient";
-import DateTimePicker from "@react-native-community/datetimepicker";
+import { analyzeTimetable } from "./../gemini";
+import { supabase } from "../supabase";  // ⬅️ import client
 
-export default function Timetable() {
-  const [timetableImage, setTimetableImage] = useState(null);
-  const [examStartDate, setExamStartDate] = useState(null);
-  const [showDatePicker, setShowDatePicker] = useState(false);
+export default function TimetableScreen() {
+  const [image, setImage] = useState(null);
+  const [result, setResult] = useState("");
 
-  // Pick timetable screenshot
-  const pickImage = async () => {
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 1,
-    });
 
-    if (!result.canceled) {
-      setTimetableImage(result.assets[0].uri);
+  const loadTimetable = async () => {
+    const { data, error } = await supabase
+      .from("timetables")
+      .select("timetable")
+      .eq("user_id", "test-user") // later replace with real user_id
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      console.error(error);
+    } else if (data.length > 0) {
+      setResult(data[0].timetable);
     }
   };
 
-  // Date Picker Handler
-  const onChangeDate = (event, selectedDate) => {
-    setShowDatePicker(false);
-    if (selectedDate) {
-      setExamStartDate(selectedDate);
+  useEffect(() => {
+    loadTimetable(); // ⬅️ fetch timetable on screen load
+  }, []);
+
+
+  const pickImage = async () => {
+    let res = await ImagePicker.launchImageLibraryAsync({
+      base64: true,
+      quality: 0.5,
+    });
+
+    if (!res.canceled) {
+      setImage(res.assets[0].uri);
+
+      const base64 = res.assets[0].base64;
+      const aiResult = await analyzeTimetable(base64);
+
+      setResult(aiResult);
+
+      // ✅ Save to Supabase
+      const { data, error } = await supabase
+        .from("timetables")
+        .insert([{ user_id: "test-user", timetable: aiResult }]);
+
+      if (error) {
+        console.error("Supabase insert error:", error);
+      } else {
+        console.log("Saved to Supabase:", data);
+      }
     }
   };
 
   return (
-    <LinearGradient
-      colors={["#4eb8e6ff", "#87b4c4ff", "#c0e7f8ff"]}
-      style={styles.container}
-    >
-      <Text style={styles.title}>Add Timetable</Text>
-
-      {/* Upload Timetable Screenshot */}
-      <TouchableOpacity style={styles.button} onPress={pickImage}>
-        <Text style={styles.buttonText}>Upload Timetable Screenshot</Text>
-      </TouchableOpacity>
-
-      {timetableImage && (
-        <Image source={{ uri: timetableImage }} style={styles.preview} />
-      )}
-
-      {/* Exam Start Date */}
-      <TouchableOpacity
-        style={[styles.button, { marginTop: 30 }]}
-        onPress={() => setShowDatePicker(true)}
-      >
-        <Text style={styles.buttonText}>
-          {examStartDate
-            ? `Exam Start: ${examStartDate.toDateString()}`
-            : "Select Exam Start Date"}
-        </Text>
-      </TouchableOpacity>
-
-      {showDatePicker && (
-        <DateTimePicker
-          value={examStartDate || new Date()}
-          mode="date"
-          display={Platform.OS === "ios" ? "spinner" : "default"}
-          onChange={onChangeDate}
+    <ScrollView style={{ flex: 1, padding: 20 }}>
+      <Button title="Pick Timetable Image" onPress={pickImage} />
+      {image && (
+        <Image
+          source={{ uri: image }}
+          style={{ width: "100%", height: 200, marginVertical: 20 }}
+          resizeMode="contain"
         />
       )}
-    </LinearGradient>
+      <Text style={{ marginTop: 20 }}>{JSON.stringify(result, null, 2)}</Text>
+    </ScrollView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: "flex-start",
-    alignItems: "center",
-    padding: 20,
-  },
-  title: {
-    fontSize: 26,
-    fontWeight: "bold",
-    color: "white",
-    marginVertical: 30,
-  },
-  button: {
-    backgroundColor: "white",
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    marginBottom: 20,
-  },
-  buttonText: {
-    fontSize: 18,
-    color: "#4eb8e6",
-    fontWeight: "bold",
-  },
-  preview: {
-    width: 280,
-    height: 200,
-    resizeMode: "contain",
-    borderRadius: 10,
-    marginTop: 20,
-  },
-});
