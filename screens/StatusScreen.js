@@ -1,57 +1,101 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, StyleSheet } from 'react-native';
-import { supabase } from '../supabase';
-import { getClientId } from '../utils/clientId';
+import React, { useEffect, useState } from "react";
+import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
+import { supabase } from "../supabase";
 
 export default function StatusScreen() {
-  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [attendance, setAttendance] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    (async () => {
-      const id = await getClientId();
-      const { data, error } = await supabase
-        .from('attendance')
-        .select('*')
-        .eq('user_id', id)
-        .order('updated_at', { ascending: false });
-      if (!error) setRows(data || []);
-    })();
+    fetchAttendance();
   }, []);
 
-  const renderItem = ({ item }) => {
-    const T = item.total_classes || 0;
-    const A = item.attended_classes || 0;
-    const p = (item.min_required_percent || 75) / 100;
-    const percent = T > 0 ? (A / T) * 100 : 0;
-    const bunkable = Math.floor(Math.max(0, (A / p) - T)); // x <= A/p - T
-    const needToAttend = Math.max(0, Math.ceil(p * T - A));
+  const fetchAttendance = async () => {
+    try {
+      const { data, error } = await supabase
+        .from("attendance")
+        .select("extracted_data")
+        .order("created_at", { ascending: false })
+        .limit(1);
 
-    return (
-      <View style={styles.card}>
-        <Text style={styles.title}>{item.course_code}{item.course_name ? ` — ${item.course_name}` : ''}</Text>
-        <Text>Attendance: {A}/{T} ({percent.toFixed(1)}%)</Text>
-        <Text>You can miss now: {bunkable}</Text>
-        <Text>Need to attend to reach target: {needToAttend}</Text>
-      </View>
-    );
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        setError("No attendance uploaded yet.");
+        setLoading(false);
+        return;
+      }
+
+      const parsed = JSON.parse(data[0].extracted_data);
+
+      if (!Array.isArray(parsed)) {
+        setError("Invalid attendance format.");
+        setLoading(false);
+        return;
+      }
+
+      // calculate total
+      const totalConducted = parsed.reduce(
+        (sum, s) => sum + (s["Conducted Classes"] || 0),
+        0
+      );
+      const totalAttended = parsed.reduce(
+        (sum, s) => sum + (s["Attended Classes"] || 0),
+        0
+      );
+      const overallPercentage =
+        totalConducted > 0
+          ? ((totalAttended / totalConducted) * 100).toFixed(2)
+          : "0.00";
+
+      // find lowest subject
+      const minSubject = parsed.reduce((min, s) => {
+        const pct = parseFloat(s["Percentage %"]) || 0;
+        return pct < min.pct ? { name: s.Subject, pct } : min;
+      }, { name: "", pct: 101 });
+
+      setAttendance({
+        overallPercentage,
+        minSubject,
+      });
+    } catch (err) {
+      setError("Failed to fetch attendance.");
+    } finally {
+      setLoading(false);
+    }
   };
 
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" />
+        <Text>Loading attendance...</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.error}>{error}</Text>
+      </View>
+    );
+  }
+
   return (
-    <View style={{ flex: 1, padding: 16 }}>
-      <Text style={styles.h1}>Attendance Status</Text>
-      <FlatList
-        data={rows}
-        keyExtractor={i => i.id}
-        renderItem={renderItem}
-        ListEmptyComponent={<Text style={{ opacity: 0.7 }}>No data yet.</Text>}
-        contentContainerStyle={{ gap: 12, paddingVertical: 8 }}
-      />
+    <View style={styles.container}>
+      <Text style={styles.title}>📊 Attendance Status</Text>
+      <Text style={styles.text}>Overall Attendance: {attendance.overallPercentage}%</Text>
+      <Text style={styles.text}>
+        Lowest Subject: {attendance.minSubject.name} ({attendance.minSubject.pct}%)
+      </Text>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  h1: { fontSize: 22, fontWeight: '700', marginBottom: 12 },
-  card: { backgroundColor: '#f7f9fc', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#e6ecf2' },
-  title: { fontWeight: '700', marginBottom: 4 },
+  container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
+  title: { fontSize: 20, fontWeight: "bold", marginBottom: 20 },
+  text: { fontSize: 16, marginVertical: 5 },
+  error: { fontSize: 16, color: "red" },
 });

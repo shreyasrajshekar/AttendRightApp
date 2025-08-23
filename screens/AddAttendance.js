@@ -1,14 +1,24 @@
 // screens/AddAttendance.js
-import React, { useState } from "react";
-import { View, Text, TouchableOpacity, Image, ActivityIndicator, StyleSheet, Alert } from "react-native";
+import React, { useState, useEffect } from "react";
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Image,
+  ActivityIndicator,
+  StyleSheet,
+  Alert,
+} from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { supabase } from "../supabase";
 import { getClientId } from "../ClientId";
 
 export default function AddAttendance() {
   const [image, setImage] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [lastAttendance, setLastAttendance] = useState(null);
 
-  // Pick screenshot
+  // pick screenshot
   const pickImage = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
       base64: true,
@@ -20,7 +30,7 @@ export default function AddAttendance() {
     }
   };
 
-  // Upload to backend
+  // upload screenshot
   const uploadAttendance = async () => {
     if (!image) return Alert.alert("Error", "Please select a screenshot first");
 
@@ -28,31 +38,46 @@ export default function AddAttendance() {
       setLoading(true);
       const clientId = await getClientId();
 
-      const res = await fetch("http://<YOUR_BACKEND_URL>/api/upload-attendance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          base64Image: image.base64,
-          clientId,
-        }),
-      });
+      // dummy extracted info, can be replaced with Gemini output
+      const dummyExtracted = { status: "uploaded", time: new Date().toISOString() };
 
-      const data = await res.json();
-      console.log("Upload response:", data);
+      const { error } = await supabase.from("attendance").insert([
+        {
+          user_id: clientId,
+          screenshot: image.base64,
+          extracted_data: dummyExtracted,
+        },
+      ]);
 
-      if (res.ok) {
-        Alert.alert("Success", "Attendance extracted and saved!");
-        setImage(null);
-      } else {
-        Alert.alert("Error", data.result || "Upload failed");
-      }
+      if (error) throw error;
+
+      Alert.alert("Success", "Attendance saved!");
+      setImage(null);
+      fetchLastAttendance(); // refresh latest
     } catch (err) {
       console.error("Upload error:", err);
-      Alert.alert("Error", "Something went wrong");
+      Alert.alert("Error", err.message || "Upload failed");
     } finally {
       setLoading(false);
     }
   };
+
+  // fetch latest attendance
+  const fetchLastAttendance = async () => {
+    const { data, error } = await supabase
+      .from("attendance")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (!error && data.length > 0) {
+      setLastAttendance(data[0]);
+    }
+  };
+
+  useEffect(() => {
+    fetchLastAttendance();
+  }, []);
 
   return (
     <View style={styles.container}>
@@ -62,9 +87,7 @@ export default function AddAttendance() {
         <Text style={styles.buttonText}>Choose Screenshot</Text>
       </TouchableOpacity>
 
-      {image && (
-        <Image source={{ uri: image.uri }} style={styles.preview} />
-      )}
+      {image && <Image source={{ uri: image.uri }} style={styles.preview} />}
 
       {loading ? (
         <ActivityIndicator size="large" color="#4eb8e6" />
@@ -75,14 +98,51 @@ export default function AddAttendance() {
           </TouchableOpacity>
         )
       )}
+
+      <Text style={styles.subtitle}>Last Updated Attendance</Text>
+      {lastAttendance ? (
+        <View style={styles.card}>
+          <Image
+            source={{ uri: `data:image/png;base64,${lastAttendance.screenshot}` }}
+            style={styles.savedImage}
+          />
+          <Text style={styles.timestamp}>
+            {new Date(lastAttendance.created_at).toLocaleString()}
+          </Text>
+        </View>
+      ) : (
+        <Text style={{ marginTop: 10, color: "#555" }}>
+          No attendance uploaded yet.
+        </Text>
+      )}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, justifyContent: "center", alignItems: "center", padding: 20 },
+  container: { padding: 20, alignItems: "center" },
   title: { fontSize: 20, fontWeight: "bold", marginBottom: 20 },
-  button: { backgroundColor: "#4eb8e6", padding: 15, borderRadius: 10, marginVertical: 10 },
+  subtitle: { fontSize: 18, fontWeight: "600", marginTop: 20 },
+  button: {
+    backgroundColor: "#4eb8e6",
+    padding: 15,
+    borderRadius: 10,
+    marginVertical: 10,
+  },
   buttonText: { color: "#fff", fontWeight: "bold" },
-  preview: { width: 250, height: 350, marginVertical: 20, resizeMode: "contain" },
+  preview: {
+    width: 250,
+    height: 350,
+    marginVertical: 20,
+    resizeMode: "contain",
+  },
+  card: {
+    marginTop: 15,
+    padding: 10,
+    backgroundColor: "#f2f2f2",
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  savedImage: { width: 200, height: 280, resizeMode: "contain" },
+  timestamp: { fontSize: 12, color: "#555", marginTop: 5 },
 });

@@ -14,6 +14,7 @@ import SplashScreenScreen from './screens/splashScreen';  // renamed to avoid co
 import LoginScreen from './screens/loginScreen';
 import SignUpScreen from './screens/SignUpScreen';
 import homeScreen from './screens/homeScreen';
+import StatusScreen from './screens/StatusScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -62,6 +63,7 @@ export default function App() {
         <Stack.Screen name="Add Attendance" component={AddAttendance} />
         <Stack.Screen name="Timetable" component={Timetable} />
         <Stack.Screen name="Advice Chat" component={AdviceChat} />
+        <Stack.Screen name="Status" component={StatusScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );
