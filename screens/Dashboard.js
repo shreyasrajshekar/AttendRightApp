@@ -8,6 +8,7 @@ export default function Dashboard({ navigation }) {
       <Button title="Go to Add Attendance" onPress={() => navigation.navigate('Add Attendance')} />
       <Button title="Go to Timetable" onPress={() => navigation.navigate('Timetable')} />
       <Button title="Go to Advice Chat" onPress={() => navigation.navigate('Advice Chat')} />
+      <Button title="Go to Status" onPress={() => navigation.navigate('Status')} />
     </View>
   );
 }
