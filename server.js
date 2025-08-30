@@ -1,32 +1,19 @@
-// server.js
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
-
-// Import dotenv at the very top to ensure it loads before any variables are used
 import dotenv from "dotenv";
-dotenv.config();
-
-// Supabase client and service role key
-// Use the 'createClient' function from the Supabase library
+import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 
-// Supabase (admin, service role key)
-// This is the line that was throwing the error, now it uses the correct env variable name
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+dotenv.config();
 
-// If you want to use the public key for some operations, you can create a second client.
-// const supabasePublic = createClient(
-//   process.env.SUPABASE_URL,
-//   process.env.SUPABASE_KEY
-// );
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 const app = express();
+app.use(cors());
 app.use(bodyParser.json({ limit: "10mb" }));
-
 
 // ----------------------
 // 1) TIMETABLE UPLOAD
@@ -37,7 +24,7 @@ app.post("/api/timetable", async (req, res) => {
     if (!clientId || !base64Image)
       return res.status(400).json({ error: "clientId and base64Image required" });
 
-    // Call Gemini
+    // Call Gemini (ask for BOTH json + explanation)
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -48,15 +35,18 @@ app.post("/api/timetable", async (req, res) => {
             {
               parts: [
                 {
-                  text:
-                    "Extract this timetable clearly and return a **student-friendly explanation of the schedule** (not JSON).",
+                  text: `Extract this timetable. 
+1) Return machine-readable JSON in this format:
+{ "days": { "Monday": ["9-10 Math", "10-11 Physics"], ... } }
+2) Also return a short student-friendly explanation.
+Output must be two parts separated clearly with:
+---JSON---
+...json...
+---EXPLANATION---
+...text...
+`
                 },
-                {
-                  inline_data: {
-                    mime_type: "image/png",
-                    data: base64Image,
-                  },
-                },
+                { inline_data: { mime_type: "image/png", data: base64Image } },
               ],
             },
           ],
@@ -65,25 +55,38 @@ app.post("/api/timetable", async (req, res) => {
     );
 
     const data = await response.json();
-    console.log("Gemini raw:", data);
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
 
-    const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "Could not extract timetable.";
+    // Split JSON + explanation
+    let timetableJson = {};
+    let explanation = "Could not extract timetable.";
+
+    if (raw.includes("---JSON---")) {
+      const parts = raw.split("---EXPLANATION---");
+      const jsonPart = parts[0].replace("---JSON---", "").trim();
+      explanation = parts[1]?.trim() || explanation;
+
+      try {
+        timetableJson = JSON.parse(jsonPart);
+      } catch (e) {
+        console.error("JSON parse error:", e);
+      }
+    }
 
     // Save in Supabase
     const { error: insertError } = await supabase.from("timetables").insert([
       {
         user_id: clientId,
-        timetable: {}, // optionally raw data if parsed later
-        analyzed_text: text,
+        timetable: timetableJson,
+        analyzed_text: explanation,
       },
     ]);
     if (insertError) {
       console.error("Supabase insert error:", insertError);
+      return res.status(500).json({ error: "Supabase insert failed" });
     }
 
-    res.json({ result: text });
+    res.json({ timetable: timetableJson, explanation });
   } catch (err) {
     console.error("Backend error:", err);
     res.status(500).json({ result: "Error analyzing timetable." });
@@ -91,7 +94,40 @@ app.post("/api/timetable", async (req, res) => {
 });
 
 // ----------------------
-// 2) CHAT WITH CONTEXT
+// 2) ATTENDANCE UPLOAD
+// ----------------------
+app.post("/api/attendance", async (req, res) => {
+  try {
+    const { clientId, attendanceData } = req.body;
+    if (!clientId || !attendanceData)
+      return res.status(400).json({ error: "clientId and attendanceData required" });
+
+    // attendanceData should be an array of objects
+    // [
+    //   { Subject: "Math", Total: 40, Present: 36, "Percentage %": "90" },
+    //   ...
+    // ]
+
+    const { error: insertError } = await supabase.from("attendance").insert([
+      {
+        user_id: clientId,
+        attendance_data: attendanceData,
+      },
+    ]);
+    if (insertError) {
+      console.error("Supabase insert error:", insertError);
+      return res.status(500).json({ error: "Supabase insert failed" });
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Backend error:", err);
+    res.status(500).json({ result: "Error uploading attendance." });
+  }
+});
+
+// ----------------------
+// 3) CHAT WITH CONTEXT
 // ----------------------
 app.post("/api/chat", async (req, res) => {
   try {
@@ -99,52 +135,60 @@ app.post("/api/chat", async (req, res) => {
     if (!clientId || !message)
       return res.status(400).json({ error: "clientId and message required" });
 
-    // 1) fetch latest timetable
-    const { data: tt } = await supabase
+    // fetch latest timetable
+    const { data: tt, error: ttErr } = await supabase
       .from("timetables")
       .select("timetable, analyzed_text, created_at")
       .eq("user_id", clientId)
       .order("created_at", { ascending: false })
       .limit(1);
 
-    // 2) fetch attendance
-    const { data: att } = await supabase
+    if (ttErr) console.error("Supabase timetable fetch error:", ttErr);
+
+    // fetch latest attendance
+    const { data: attRows, error: attErr } = await supabase
       .from("attendance")
-      .select(
-        "course_code, course_name, total_classes, attended_classes, min_required_percent"
-      )
-      .eq("user_id", clientId);
+      .select("attendance_data, created_at")
+      .eq("user_id", clientId)
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (attErr) console.error("Supabase attendance fetch error:", attErr);
+
+    let attendanceText = "";
+    if (attRows && attRows.length > 0) {
+      const attData = attRows[0].attendance_data;
+      if (Array.isArray(attData)) {
+        attendanceText = attData
+          .map((a) => {
+            const T = a.Total || 0;
+            const A = a.Present || 0;
+            const p = a["Percentage %"] || "N/A";
+            return `${a.Subject}: ${A}/${T} (${p}%)`;
+          })
+          .join("\n");
+      }
+    }
 
     const timetableText =
-      tt?.[0]?.analyzed_text ||
-      JSON.stringify(tt?.[0]?.timetable || {}, null, 2);
-    const attendanceText = (att || [])
-      .map((a) => {
-        const T = a.total_classes || 0;
-        const A = a.attended_classes || 0;
-        const p = a.min_required_percent || 75;
-        return `${a.course_code}${
-          a.course_name ? ` (${a.course_name})` : ""
-        }: ${A}/${T} at ${p}% target`;
-      })
-      .join("\n");
+      tt?.[0]?.analyzed_text || "(no timetable found)";
 
-    // 3) build prompt
-    const system = `You are a student advisor. Use the user's timetable and attendance to give personalized, actionable advice. 
-- If asked "what can I miss", compute using: bunkable = floor(max(0, (A / (p/100)) - T)). 
-- If asked "how to reach X%", compute minimum classes needed next: need = ceil(p*T - A). 
-- Be concise and friendly.`;
+    // prompt
+    const system = `You are a student advisor. Use the timetable and attendance to give personalized advice.
+- If asked "what can I miss", compute: bunkable = floor(max(0, (A / (p/100)) - T)).
+- If asked "how to reach X%", compute: need = ceil(p*T - A).
+Be concise and friendly.`;
 
     const userMsg = `User message: ${message}
 
-Latest timetable:
-${timetableText || "(no timetable found)"}
+Timetable:
+${timetableText}
 
 Attendance:
-${attendanceText || "(no attendance found)"}
+${attendanceText}
 `;
 
-    // 4) call Gemini
+    // call Gemini
     const gRes = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -155,6 +199,7 @@ ${attendanceText || "(no attendance found)"}
         }),
       }
     );
+
     const gData = await gRes.json();
     const text =
       gData?.candidates?.[0]?.content?.parts?.[0]?.text ||
@@ -167,5 +212,4 @@ ${attendanceText || "(no attendance found)"}
   }
 });
 
-// ----------------------
 app.listen(5000, () => console.log("Server running on port 5000"));
