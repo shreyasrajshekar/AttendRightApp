@@ -14,7 +14,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const app = express();
 app.use(cors());
 app.use(bodyParser.json({ limit: "10mb" }));
-
+console.log("Supabase initialized");
 // ----------------------
 // 1) TIMETABLE UPLOAD
 // ----------------------
@@ -24,7 +24,7 @@ app.post("/api/timetable", async (req, res) => {
     if (!clientId || !base64Image)
       return res.status(400).json({ error: "clientId and base64Image required" });
 
-    // Call Gemini (ask for BOTH json + explanation)
+    // Call Gemini to extract timetable JSON and explanation
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -35,16 +35,10 @@ app.post("/api/timetable", async (req, res) => {
             {
               parts: [
                 {
-                  text: `Extract this timetable. 
-1) Return machine-readable JSON in this format:
+                  text: `Extract this timetable from the screenshot.
+Return machine-readable JSON in this format:
 { "days": { "Monday": ["9-10 Math", "10-11 Physics"], ... } }
-2) Also return a short student-friendly explanation.
-Output must be two parts separated clearly with:
----JSON---
-...json...
----EXPLANATION---
-...text...
-`
+If you cannot extract, return ---JSON---{}--Could not extract timetable.`
                 },
                 { inline_data: { mime_type: "image/png", data: base64Image } },
               ],
@@ -69,21 +63,25 @@ Output must be two parts separated clearly with:
       try {
         timetableJson = JSON.parse(jsonPart);
       } catch (e) {
-        console.error("JSON parse error:", e);
+        console.error("Timetable JSON parse error:", e);
+        timetableJson = {};
       }
     }
 
-    // Save in Supabase
-    const { error: insertError } = await supabase.from("timetables").insert([
-      {
-        user_id: clientId,
-        timetable: timetableJson,
-        analyzed_text: explanation,
-      },
-    ]);
-    if (insertError) {
-      console.error("Supabase insert error:", insertError);
-      return res.status(500).json({ error: "Supabase insert failed" });
+    // Save in Supabase only if timetableJson is not empty
+    if (timetableJson && timetableJson.days && Object.keys(timetableJson.days).length > 0) {
+      const { error: insertError } = await supabase.from("timetables").insert([
+        {
+          user_id: clientId,
+          screenshot: base64Image,
+          timetable: timetableJson,
+          analyzed_text: explanation,
+        },
+      ]);
+      if (insertError) {
+        console.error("Supabase insert error:", insertError);
+        return res.status(500).json({ error: "Supabase insert failed" });
+      }
     }
 
     res.json({ timetable: timetableJson, explanation });
@@ -92,40 +90,80 @@ Output must be two parts separated clearly with:
     res.status(500).json({ result: "Error analyzing timetable." });
   }
 });
-
 // ----------------------
 // 2) ATTENDANCE UPLOAD
 // ----------------------
 app.post("/api/attendance", async (req, res) => {
   try {
-    const { clientId, attendanceData } = req.body;
-    if (!clientId || !attendanceData)
-      return res.status(400).json({ error: "clientId and attendanceData required" });
+    const { clientId, base64Image } = req.body;
+    if (!clientId || !base64Image)
+      return res.status(400).json({ error: "clientId and base64Image required" });
 
-    // attendanceData should be an array of objects
-    // [
-    //   { Subject: "Math", Total: 40, Present: 36, "Percentage %": "90" },
-    //   ...
-    // ]
-
-    const { error: insertError } = await supabase.from("attendance").insert([
+    // Call Gemini to extract attendance JSON
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
-        user_id: clientId,
-        attendance_data: attendanceData,
-      },
-    ]);
-    if (insertError) {
-      console.error("Supabase insert error:", insertError);
-      return res.status(500).json({ error: "Supabase insert failed" });
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: `Extract attendance from this screenshot.
+Return a machine-readable JSON array like:
+[
+  { "Subject": "Math", "Total": 40, "Present": 36, "Percentage %": "90" },
+  ...
+]
+If you cannot extract, return an empty array [].
+`
+                },
+                { inline_data: { mime_type: "image/png", data: base64Image } },
+              ],
+            },
+          ],
+        }),
+      }
+    );
+
+    const data = await response.json();
+    const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    // Try to extract JSON array from Gemini response
+    let attendanceData = [];
+    try {
+      // Find the first [ ... ] block in the response
+      const match = raw.match(/\[([\s\S]*?)\]/);
+      if (match) {
+        attendanceData = JSON.parse(match[0]);
+      }
+    } catch (e) {
+      console.error("Attendance JSON parse error:", e);
+      attendanceData = [];
     }
 
-    res.json({ success: true });
+    // Save in Supabase only if attendanceData is not empty
+    if (Array.isArray(attendanceData) && attendanceData.length > 0) {
+      const { error: insertError } = await supabase.from("attendance").insert([
+        {
+          user_id: clientId,
+          screenshot: base64Image,
+          attendance_data: attendanceData,
+        },
+      ]);
+      if (insertError) {
+        console.error("Supabase insert error:", insertError);
+        return res.status(500).json({ error: "Supabase insert failed" });
+      }
+    }
+
+    res.json({ attendance_data: attendanceData });
   } catch (err) {
     console.error("Backend error:", err);
     res.status(500).json({ result: "Error uploading attendance." });
   }
 });
-
 // ----------------------
 // 3) CHAT WITH CONTEXT
 // ----------------------
@@ -211,5 +249,29 @@ ${attendanceText}
     res.status(500).json({ error: "chat error" });
   }
 });
+// ----------------------
+// 4) CLEAR DATA
+// ----------------------
+app.post("/api/clear", async (req, res) => {
+  try {
+    const { clientId } = req.body;
+    if (!clientId) return res.status(400).json({ error: "clientId required" });
+
+    // delete timetable + attendance
+    const { error: tErr } = await supabase.from("timetables").delete().eq("user_id", clientId);
+    const { error: aErr } = await supabase.from("attendance").delete().eq("user_id", clientId);
+
+    if (tErr || aErr) {
+      console.error("Supabase delete error:", tErr || aErr);
+      return res.status(500).json({ error: "Failed to clear data" });
+    }
+
+    res.json({ success: true, message: "Data cleared successfully!" });
+  } catch (e) {
+    console.error("Clear error:", e);
+    res.status(500).json({ error: "clear error" });
+  }
+});
+
 
 app.listen(5000, () => console.log("Server running on port 5000"));

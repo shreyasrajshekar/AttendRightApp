@@ -1,197 +1,219 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, ActivityIndicator } from "react-native";
+import { View, Text, FlatList, StyleSheet } from "react-native";
 import { supabase } from "../supabase";
 
-const MIN_ATTENDANCE = 85;
-
-export default function StatusScreen() {
-  const [attendance, setAttendance] = useState([]);
-  const [timetable, setTimetable] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+export default function AttendanceScreen() {
+  const [data, setData] = useState([]);
 
   useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const { data: attendanceRes, error: attendanceErr } = await supabase
+          .from("attendance")
+          .select("attendance_data")
+          .single();
+
+        if (attendanceErr) throw attendanceErr;
+
+        let attendanceData = [];
+        if (typeof attendanceRes.attendance_data === "string") {
+          attendanceData = JSON.parse(attendanceRes.attendance_data);
+        } else {
+          attendanceData = attendanceRes.attendance_data;
+        }
+
+        const { data: timetableRes, error: timetableErr } = await supabase
+          .from("timetables")
+          .select("*");
+
+        if (timetableErr) throw timetableErr;
+
+        const today = new Date();
+
+        const processed = attendanceData.map((att) => {
+          const timetable = timetableRes.find(
+            (t) =>
+              t.subject.trim().toLowerCase() ===
+              att.Subject.trim().toLowerCase()
+          );
+
+          let remainingClasses = 0;
+          let maxBunkable = 0;
+          let projectedPercentage = parseFloat(att["Percentage %"]);
+          let projectedIfBunkAll = projectedPercentage;
+
+          if (timetable) {
+            const examDate = new Date(timetable.exam_start_date);
+            const diffTime = examDate - today;
+            const weeksRemaining = Math.ceil(
+              diffTime / (7 * 24 * 60 * 60 * 1000)
+            );
+
+            if (weeksRemaining > 0) {
+              remainingClasses = weeksRemaining * timetable.classes_per_week;
+            }
+
+            const totalFuture = att.Total + remainingClasses;
+            projectedPercentage =
+              ((att.Present + remainingClasses) / totalFuture) * 100;
+
+            const minRequired = Math.ceil(totalFuture * 0.85);
+
+            maxBunkable = Math.max(
+              0,
+              totalFuture - minRequired - (att.Total - att.Present)
+            );
+
+            projectedIfBunkAll =
+              maxBunkable > 0
+                ? (att.Present / (att.Total + maxBunkable)) * 100
+                : projectedPercentage;
+          }
+
+          return {
+            subject: att.Subject,
+            total: att.Total,
+            attended: att.Present,
+            percentage: parseFloat(att["Percentage %"]),
+            projectedPercentage,
+            projectedIfBunkAll,
+            remainingClasses,
+            maxBunkable,
+          };
+        });
+
+        setData(processed);
+      } catch (err) {
+        console.error("Error fetching data:", err.message);
+      }
+    };
+
     fetchData();
   }, []);
 
-  async function fetchData() {
-    try {
-      // Fetch latest attendance (attendance_data column)
-      const { data: attendanceRows, error: attError } = await supabase
-        .from("attendance")
-        .select("attendance_data")
-        .order("created_at", { ascending: false })
-        .limit(1);
+  const renderCard = ({ item }) => (
+    <View
+      style={[
+        styles.card,
+        item.projectedPercentage < 85 && styles.cardDanger,
+      ]}
+    >
+      {/* Subject Name */}
+      <Text style={styles.subject}>{item.subject}</Text>
 
-      if (attError) throw attError;
-
-      let attendanceJson = [];
-      if (attendanceRows && attendanceRows.length > 0) {
-        const raw = attendanceRows[0].attendance_data;
-        if (Array.isArray(raw)) {
-          attendanceJson = raw;
-        } else if (typeof raw === "string") {
-          const parsed = JSON.parse(raw);
-          attendanceJson = Array.isArray(parsed) ? parsed : [parsed];
-        } else if (typeof raw === "object" && raw !== null) {
-          attendanceJson = [raw];
-        }
-      }
-      setAttendance(attendanceJson);
-
-      // Fetch latest timetable (timetable column)
-      const { data: ttData, error: ttError } = await supabase
-        .from("timetables")
-        .select("timetable")
-        .order("created_at", { ascending: false })
-        .limit(1);
-
-      if (ttError) throw ttError;
-
-      let timetableJson = [];
-      if (ttData && ttData.length > 0) {
-        const raw = ttData[0].timetable;
-        if (Array.isArray(raw)) {
-          timetableJson = raw;
-        } else if (typeof raw === "string") {
-          const parsed = JSON.parse(raw);
-          timetableJson = Array.isArray(parsed) ? parsed : [parsed];
-        } else if (typeof raw === "object" && raw !== null) {
-          timetableJson = [raw];
-        }
-      }
-      setTimetable(timetableJson);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function getAISuggestions(attendanceArr, timetableJson) {
-    const suggestions = [];
-
-    attendanceArr.forEach((subj) => {
-      const pct = parseFloat(subj["Percentage %"] || 0);
-
-      if (pct > MIN_ATTENDANCE) {
-        // Try to find subject in timetable JSON
-        const nextClass = Array.isArray(timetableJson)
-          ? timetableJson.find(
-              (tt) =>
-                tt.subject?.toLowerCase() === subj.Subject?.toLowerCase()
-            )
-          : null;
-
-        if (nextClass) {
-          // Calculate how many classes can be bunked
-          const total = subj.Total || 0;
-          const present = subj.Present || 0;
-          let canBunk = 0;
-
-          // calculate bunkable classes
-          while (
-            ((present / (total + canBunk)) * 100) >= MIN_ATTENDANCE
-          ) {
-            canBunk++;
-          }
-          canBunk = Math.max(0, canBunk - 1);
-
-          suggestions.push(
-            `✅ You are eligible (${pct}%). You can bunk around ${canBunk} more "${subj.Subject}" classes (next on ${nextClass.day || "?"} at ${nextClass.time || "?"}).`
-          );
-        } else {
-          suggestions.push(
-            `✅ You are eligible (${pct}%). You can bunk future "${subj.Subject}" classes.`
-          );
-        }
-      } else {
-        suggestions.push(
-          `⚠️ You are NOT eligible for "${subj.Subject}" (only ${pct}%).`
-        );
-      }
-    });
-
-    if (suggestions.length === 0) {
-      suggestions.push("No attendance data available.");
-    }
-    return suggestions;
-  }
-
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#007bff" />
+      {/* Current Attendance */}
+      <View style={styles.row}>
+        <Text style={styles.label}>Total:</Text>
+        <Text style={styles.value}>{item.total}</Text>
       </View>
-    );
-  }
-
-  if (error) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.error}>Error: {error}</Text>
+      <View style={styles.row}>
+        <Text style={styles.label}>Attended:</Text>
+        <Text style={styles.value}>{item.attended}</Text>
       </View>
-    );
-  }
+      <View style={styles.row}>
+        <Text style={styles.label}>Current %:</Text>
+        <Text
+          style={[
+            styles.value,
+            item.percentage < 85 && styles.textDanger,
+          ]}
+        >
+          {item.percentage.toFixed(2)}%
+        </Text>
+      </View>
 
-  const aiSuggestions = getAISuggestions(attendance, timetable);
+      {/* Future Projections */}
+      <View style={styles.separator} />
+
+      <View style={styles.row}>
+        <Text style={styles.label}>Remaining:</Text>
+        <Text style={styles.value}>{item.remainingClasses}</Text>
+      </View>
+      <View style={styles.row}>
+        <Text style={styles.label}>Max Bunkable:</Text>
+        <Text style={styles.value}>{item.maxBunkable}</Text>
+      </View>
+      <View style={styles.row}>
+        <Text style={styles.label}>If attend all:</Text>
+        <Text
+          style={[
+            styles.value,
+            item.projectedPercentage < 85 && styles.textDanger,
+          ]}
+        >
+          {item.projectedPercentage.toFixed(2)}%
+        </Text>
+      </View>
+      <View style={styles.row}>
+        <Text style={styles.label}>
+          If bunk all ({item.maxBunkable}):
+        </Text>
+        <Text
+          style={[
+            styles.value,
+            item.projectedIfBunkAll < 85 && styles.textDanger,
+          ]}
+        >
+          {item.projectedIfBunkAll.toFixed(2)}%
+        </Text>
+      </View>
+    </View>
+  );
 
   return (
-    <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.header}>📊 Attendance Status</Text>
-      {attendance.map((subj, idx) => (
-        <View key={idx} style={styles.card}>
-          <Text style={styles.subj}>{subj.Subject}</Text>
-          <Text>Total: {subj.Total}</Text>
-          <Text>Present: {subj.Present}</Text>
-          <Text style={{ color: subj["Percentage %"] >= MIN_ATTENDANCE ? "green" : "red" }}>
-            Percentage: {subj["Percentage %"]}%
-          </Text>
-        </View>
-      ))}
-
-      <Text style={styles.header}>🤖 AI Suggestions</Text>
-      {aiSuggestions.map((s, idx) => (
-        <Text key={idx} style={styles.suggestion}>• {s}</Text>
-      ))}
-    </ScrollView>
+    <FlatList
+      data={data}
+      keyExtractor={(item, index) => index.toString()}
+      renderItem={renderCard}
+      contentContainerStyle={{ padding: 12 }}
+    />
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    padding: 16,
-    backgroundColor: "#f8f9fa",
-  },
-  center: {
-    flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  header: {
-    fontSize: 20,
-    fontWeight: "bold",
-    marginVertical: 12,
-  },
   card: {
-    backgroundColor: "#fff",
-    padding: 12,
-    marginVertical: 6,
-    borderRadius: 10,
+    backgroundColor: "#eefffeff",
+    padding: 16,
+    marginVertical: 8,
+    borderRadius: 12,
     shadowColor: "#000",
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.05,
     shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 6,
+    elevation: 3,
+    borderWidth: 1,
+    borderColor: "#eee",
   },
-  subj: {
+  cardDanger: {
+    borderColor: "#ff4d4d",
+    backgroundColor: "#fff5f5",
+  },
+  subject: {
+    fontWeight: "700",
     fontSize: 18,
+    marginBottom: 12,
+    color: "#333",
+  },
+  row: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  label: {
+    fontSize: 14,
+    color: "#666",
+  },
+  value: {
+    fontSize: 14,
     fontWeight: "600",
+    color: "#222",
   },
-  suggestion: {
-    fontSize: 16,
-    marginVertical: 4,
+  textDanger: {
+    color: "#d32f2f",
   },
-  error: {
-    color: "red",
-    fontSize: 16,
+  separator: {
+    height: 1,
+    backgroundColor: "#eee",
+    marginVertical: 10,
   },
 });

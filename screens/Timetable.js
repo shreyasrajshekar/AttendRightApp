@@ -1,145 +1,174 @@
-// screens/Timetable.js
 import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
-  Image,
-  ActivityIndicator,
+  ScrollView,
   StyleSheet,
   Alert,
-  ScrollView,
 } from "react-native";
-import * as ImagePicker from "expo-image-picker";
+import { Picker } from "@react-native-picker/picker";
 import { supabase } from "../supabase";
-import { getClientId } from "../ClientId";
+
+// subjects list
+const subjectsData = [
+  { Subject: "Calculus and Differential Equations", ConductedClasses: 15 },
+  { Subject: "Materials Chemistry for Devices and E-Waste Manage", ConductedClasses: 12 },
+  { Subject: "Problem Solving Through Programming", ConductedClasses: 11 },
+  { Subject: "Basic Electronics", ConductedClasses: 12 },
+  { Subject: "Environmental Science & Sustainability", ConductedClasses: 3 },
+  { Subject: "Communicative English", ConductedClasses: 8 },
+  { Subject: "Engineering Visualization", ConductedClasses: 54 },
+  { Subject: "Biology for Engineers", ConductedClasses: 10 },
+];
 
 export default function Timetable() {
-  const [image, setImage] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [savedTimetables, setSavedTimetables] = useState([]);
+  const [examStartDate, setExamStartDate] = useState("");
+  const [selectedSubject, setSelectedSubject] = useState(subjectsData[0].Subject);
+  const [classesPerWeek, setClassesPerWeek] = useState("");
+  const [savedData, setSavedData] = useState([]);
 
-  // pick timetable screenshot
-  const pickImage = async () => {
-    let result = await ImagePicker.launchImageLibraryAsync({
-      base64: true,
-      quality: 0.8,
-    });
-
-    if (!result.canceled) {
-      setImage(result.assets[0]);
-    }
-  };
-
-  // upload timetable to Supabase
-  const uploadTimetable = async () => {
-    if (!image) return Alert.alert("Error", "Please select a screenshot first");
-
-    try {
-      setLoading(true);
-      const clientId = await getClientId();
-
-      // (optional) send to Gemini API for extraction before saving
-      // For now we just store the base64 + dummy extracted JSON
-      const dummyExtracted = { status: "uploaded", time: new Date().toISOString() };
-
-      const { error } = await supabase.from("timetables").insert([
-        {
-          user_id: clientId,
-          screenshot: image.base64,
-          timetable: dummyExtracted,
-        },
-      ]);
-
-      if (error) throw error;
-
-      Alert.alert("Success", "Timetable saved!");
-      setImage(null);
-      fetchSavedTimetables(); // refresh list
-    } catch (err) {
-      console.error("Upload error:", err);
-      Alert.alert("Error", err.message || "Upload failed");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // fetch saved timetables
-  const fetchSavedTimetables = async () => {
+  // fetch saved
+  const fetchSavedData = async () => {
     const { data, error } = await supabase
       .from("timetables")
       .select("*")
       .order("created_at", { ascending: false });
 
-    if (!error && data) {
-      setSavedTimetables(data);
+    if (!error && data) setSavedData(data);
+  };
+
+  // insert record
+  const saveData = async () => {
+    if (!examStartDate || !selectedSubject || !classesPerWeek) {
+      Alert.alert("⚠️ Error", "Please fill all fields");
+      return;
+    }
+
+    const { error } = await supabase.from("timetables").insert([
+      {
+        subject: selectedSubject,
+        classes_per_week: parseInt(classesPerWeek),
+        exam_start_date: examStartDate,
+      },
+    ]);
+
+    if (error) {
+      console.error("Insert error:", error);
+      Alert.alert("❌ Error", "Could not save data");
+    } else {
+      Alert.alert("✅ Success", "Data saved successfully");
+      setClassesPerWeek("");
+      fetchSavedData();
     }
   };
 
   useEffect(() => {
-    fetchSavedTimetables();
+    fetchSavedData();
   }, []);
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Upload Timetable Screenshot</Text>
+      <Text style={styles.header}>📅 Timetable Planner</Text>
 
-      <TouchableOpacity style={styles.button} onPress={pickImage}>
-        <Text style={styles.buttonText}>Choose Screenshot</Text>
-      </TouchableOpacity>
+      <View style={styles.card}>
+        <Text style={styles.label}> Exam Start Date</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="YYYY-MM-DD"
+          value={examStartDate}
+          onChangeText={setExamStartDate}
+        />
 
-      {image && <Image source={{ uri: image.uri }} style={styles.preview} />}
-
-      {loading ? (
-        <ActivityIndicator size="large" color="#4eb8e6" />
-      ) : (
-        image && (
-          <TouchableOpacity style={styles.button} onPress={uploadTimetable}>
-            <Text style={styles.buttonText}>Upload & Save</Text>
-          </TouchableOpacity>
-        )
-      )}
-
-      <Text style={styles.subtitle}>Saved Timetables</Text>
-      {savedTimetables.map((t) => (
-        <View key={t.id} style={styles.card}>
-          <Image
-            source={{ uri: `data:image/png;base64,${t.screenshot}` }}
-            style={styles.savedImage}
-          />
-          <Text style={styles.timestamp}>
-            {new Date(t.created_at).toLocaleString()}
-          </Text>
+        <Text style={styles.label}> Select Subject</Text>
+        <View style={styles.pickerWrapper}>
+          <Picker
+            selectedValue={selectedSubject}
+            onValueChange={(itemValue) => setSelectedSubject(itemValue)}
+          >
+            {subjectsData.map((s, index) => (
+              <Picker.Item key={index} label={s.Subject} value={s.Subject} />
+            ))}
+          </Picker>
         </View>
-      ))}
+
+        <Text style={styles.label}> Classes Per Week</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Enter number"
+          keyboardType="numeric"
+          value={classesPerWeek}
+          onChangeText={setClassesPerWeek}
+        />
+
+        <TouchableOpacity style={styles.primaryButton} onPress={saveData}>
+          <Text style={styles.buttonText}> Save</Text>
+        </TouchableOpacity>
+      </View>
+
+      <Text style={styles.subtitle}>📂 Saved Timetables</Text>
+      {savedData.length === 0 ? (
+        <Text style={{ marginTop: 10, color: "#777" }}>
+          No timetables saved yet.
+        </Text>
+      ) : (
+        savedData.map((item) => (
+          <View key={item.id} style={styles.savedCard}>
+            <Text style={styles.savedSubject}>📘 {item.subject}</Text>
+            <Text style={styles.savedText}>🗓 Exam Start: {item.exam_start_date}</Text>
+            <Text style={styles.savedText}>📊 {item.classes_per_week} classes/week</Text>
+          </View>
+        ))
+      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, alignItems: "center" },
-  title: { fontSize: 20, fontWeight: "bold", marginBottom: 20 },
-  subtitle: { fontSize: 18, fontWeight: "600", marginTop: 20 },
-  button: {
+  container: { padding: 20, backgroundColor: "#f9fafb" },
+  header: { fontSize: 22, fontWeight: "bold", marginBottom: 20, textAlign: "center", color: "#333" },
+  label: { fontSize: 16, fontWeight: "600", marginTop: 10, color: "#444" },
+  input: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+    backgroundColor: "#fff",
+  },
+  pickerWrapper: {
+    borderWidth: 1,
+    borderColor: "#ccc",
+    borderRadius: 8,
+    marginBottom: 12,
+    backgroundColor: "#fff",
+  },
+  primaryButton: {
     backgroundColor: "#4eb8e6",
     padding: 15,
     borderRadius: 10,
-    marginVertical: 10,
-  },
-  buttonText: { color: "#fff", fontWeight: "bold" },
-  preview: {
-    width: 250,
-    height: 350,
-    marginVertical: 20,
-    resizeMode: "contain",
-  },
-  card: {
-    marginTop: 15,
-    padding: 10,
-    backgroundColor: "#f2f2f2",
-    borderRadius: 10,
     alignItems: "center",
+    marginTop: 10,
   },
-  savedImage: { width: 200, height: 280, resizeMode: "contain" },
-  timestamp: { fontSize: 12, color: "#555", marginTop: 5 },
+  buttonText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
+  subtitle: { fontSize: 18, fontWeight: "600", marginTop: 25, color: "#444" },
+  card: {
+    backgroundColor: "#ffffff",
+    borderRadius: 12,
+    padding: 15,
+    marginBottom: 20,
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
+  },
+  savedCard: {
+    backgroundColor: "#e8f6ff",
+    padding: 12,
+    borderRadius: 10,
+    marginVertical: 8,
+  },
+  savedSubject: { fontWeight: "bold", fontSize: 16, color: "#333" },
+  savedText: { color: "#555", marginTop: 3 },
 });

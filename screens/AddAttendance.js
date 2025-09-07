@@ -13,31 +13,6 @@ import * as ImagePicker from "expo-image-picker";
 import { supabase } from "../supabase";
 import { getClientId } from "../ClientId";
 
-// ✅ Gemini API call helper
-async function extractAttendance(base64Image) {
-  try {
-    const response = await fetch("http://localhost:3000/extract", { // your server.js Gemini endpoint
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image: base64Image,
-        prompt:
-          "Extract attendance details from this screenshot. Return JSON array like [{subject:'ECE111', attended:30, total:34}, ...].",
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.statusText}`);
-    }
-
-    const result = await response.json();
-    return result; // parsed JSON
-  } catch (err) {
-    console.error("Gemini extract error:", err);
-    return null;
-  }
-}
-
 export default function AddAttendance() {
   const [image, setImage] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -46,10 +21,8 @@ export default function AddAttendance() {
   // pick attendance screenshot
   const pickImage = async () => {
     let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
+      base64: true,
       quality: 0.8,
-      base64: true, // ✅ we need base64
     });
 
     if (!result.canceled) {
@@ -57,38 +30,39 @@ export default function AddAttendance() {
     }
   };
 
-  // upload attendance (with Gemini extraction)
+  // upload attendance screenshot + extracted JSON
   const uploadAttendance = async () => {
-    if (!image) {
-      Alert.alert("Error", "Please select a screenshot first");
-      return;
-    }
-
+    if (!image) return Alert.alert("Error", "Please select a screenshot first");
     try {
       setLoading(true);
       const clientId = await getClientId();
 
-      // ✅ Step 1: Extract JSON from Gemini
-      const extractedJson = await extractAttendance(image.base64);
+      const response = await fetch("https://attendrightapp.onrender.com/api/attendance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId,
+          base64Image: image.base64,
+        }),
+      });
 
-      if (!extractedJson) {
-        Alert.alert("Error", "Failed to extract attendance from screenshot.");
+      const result = await response.json();
+      if (result.error) throw new Error(result.error);
+
+      if (
+        !result.attendance_data ||
+        !Array.isArray(result.attendance_data) ||
+        result.attendance_data.length === 0
+      ) {
+        Alert.alert(
+          "Error",
+          "No attendance data could be extracted from the image."
+        );
         setLoading(false);
         return;
       }
 
-      // ✅ Step 2: Save image + extracted data to Supabase
-      const { error: insertError } = await supabase.from("attendance").insert([
-        {
-          user_id: clientId,
-          screenshot: image.base64, // base64 image
-          attendance_data: extractedJson, // JSON from Gemini
-        },
-      ]);
-
-      if (insertError) throw insertError;
-
-      Alert.alert("Success", "Attendance saved!");
+      Alert.alert("✅ Success", "Attendance extracted and saved!");
       setImage(null);
       fetchSavedAttendance();
     } catch (err) {
@@ -111,81 +85,134 @@ export default function AddAttendance() {
     }
   };
 
+  // clear database
+  const clearAttendance = async () => {
+    Alert.alert("Confirm", "Do you want to delete all attendance records?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          const { error } = await supabase.from("attendance").delete().neq("id", 0);
+          if (error) {
+            Alert.alert("Error", "Failed to clear data");
+          } else {
+            Alert.alert("Cleared", "All attendance records removed");
+            setSavedAttendance([]);
+          }
+        },
+      },
+    ]);
+  };
+
   useEffect(() => {
     fetchSavedAttendance();
   }, []);
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Upload Attendance Screenshot</Text>
+      <Text style={styles.title}> Upload Attendance Screenshot</Text>
 
-      <TouchableOpacity style={styles.button} onPress={pickImage}>
+      <TouchableOpacity style={styles.primaryButton} onPress={pickImage}>
         <Text style={styles.buttonText}>Choose Screenshot</Text>
       </TouchableOpacity>
 
       {image && <Image source={{ uri: image.uri }} style={styles.preview} />}
 
       {loading ? (
-        <ActivityIndicator size="large" color="#4eb8e6" />
+        <ActivityIndicator size="large" color="#4eb8e6" style={{ margin: 15 }} />
       ) : (
         image && (
-          <TouchableOpacity style={styles.button} onPress={uploadAttendance}>
+          <TouchableOpacity style={styles.primaryButton} onPress={uploadAttendance}>
             <Text style={styles.buttonText}>Upload & Save</Text>
           </TouchableOpacity>
         )
       )}
 
-      <Text style={styles.subtitle}>Saved Attendance</Text>
-      {savedAttendance.map((a) => (
-        <View key={a.id} style={styles.card}>
-          {a.screenshot ? (
-            <Image
-              source={{ uri: `data:image/png;base64,${a.screenshot}` }}
-              style={styles.savedImage}
-            />
-          ) : (
-            <Text>No image</Text>
-          )}
-          <Text style={styles.timestamp}>
-            {new Date(a.created_at).toLocaleString()}
-          </Text>
-          {a.attendance_data ? (
-            <Text style={{ fontSize: 12 }}>
-              {JSON.stringify(a.attendance_data)}
+      <TouchableOpacity style={styles.dangerButton} onPress={clearAttendance}>
+        <Text style={styles.buttonText}>🗑 Clear Attendance Data</Text>
+      </TouchableOpacity>
+
+      <Text style={styles.subtitle}>📂 Saved Attendance</Text>
+      {savedAttendance.length === 0 ? (
+        <Text style={{ marginTop: 10, color: "#777" }}>
+          No records saved yet.
+        </Text>
+      ) : (
+        savedAttendance.map((a) => (
+          <View key={a.id} style={styles.card}>
+            {a.screenshot ? (
+              <Image
+                source={{ uri: `data:image/png;base64,${a.screenshot}` }}
+                style={styles.savedImage}
+              />
+            ) : (
+              <Text>No image</Text>
+            )}
+            <Text style={styles.timestamp}>
+              {new Date(a.created_at).toLocaleString()}
             </Text>
-          ) : (
-            <Text>No extracted data</Text>
-          )}
-        </View>
-      ))}
+            {a.attendance_data ? (
+              <Text style={styles.jsonText}>
+                {JSON.stringify(a.attendance_data, null, 2)}
+              </Text>
+            ) : (
+              <Text>No extracted data</Text>
+            )}
+          </View>
+        ))
+      )}
     </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 20, alignItems: "center" },
-  title: { fontSize: 20, fontWeight: "bold", marginBottom: 20 },
-  subtitle: { fontSize: 18, fontWeight: "600", marginTop: 20 },
-  button: {
+  container: { padding: 20, alignItems: "center", backgroundColor: "#f9fafb" },
+  title: { fontSize: 22, fontWeight: "bold", marginBottom: 20, color: "#333" },
+  subtitle: { fontSize: 18, fontWeight: "600", marginTop: 25, color: "#444" },
+  primaryButton: {
     backgroundColor: "#4eb8e6",
     padding: 15,
-    borderRadius: 10,
+    borderRadius: 12,
     marginVertical: 10,
+    width: "80%",
+    alignItems: "center",
+    shadowColor: "#000",
+    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 3,
   },
-  buttonText: { color: "#fff", fontWeight: "bold" },
+  dangerButton: {
+    backgroundColor: "#e74c3c",
+    padding: 15,
+    borderRadius: 12,
+    marginVertical: 10,
+    width: "80%",
+    alignItems: "center",
+  },
+  buttonText: { color: "#fff", fontWeight: "bold", fontSize: 16 },
   preview: {
     width: 250,
     height: 350,
     marginVertical: 20,
     resizeMode: "contain",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#ccc",
   },
   card: {
     marginTop: 15,
-    padding: 10,
-    backgroundColor: "#f2f2f2",
-    borderRadius: 10,
+    padding: 12,
+    backgroundColor: "#fff",
+    borderRadius: 12,
     alignItems: "center",
+    width: "90%",
+    shadowColor: "#000",
+    shadowOpacity: 0.05,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 4,
   },
   savedImage: { width: 200, height: 280, resizeMode: "contain" },
-  timestamp: { fontSize: 12, color: "#555", marginTop: 5 },
+  timestamp: { fontSize: 12, color: "#777", marginTop: 5 },
+  jsonText: { fontSize: 12, marginTop: 5, color: "#444" },
 });
